@@ -9,6 +9,9 @@ import vk "vendor:vulkan"
 
 window: glfw.WindowHandle
 
+VERTEX_SHADER :: #load("../shaders/build/vert.spv", []byte)
+FRAG_SHADER :: #load("../shaders/build/frag.spv", []byte)
+
 Vulkan_Context :: struct {
     instance:               vk.Instance,
     physical_device:        vk.PhysicalDevice,
@@ -62,6 +65,7 @@ init_vulkan :: proc() {
     create_logical_device()
     create_swap_chain()
     create_image_views()
+    create_graphics_pipeline()
 }
 
 create_instance :: proc() {
@@ -435,6 +439,43 @@ create_image_views :: proc() {
             panic("Unable to create image view for swap chain images")
         }
     }
+}
+
+create_graphics_pipeline :: proc() {
+    vert_shader_module := create_shader_module(VERTEX_SHADER)
+    frag_shader_module := create_shader_module(FRAG_SHADER)
+
+    vert_shader_pipeline_stage := vk.PipelineShaderStageCreateInfo {
+        sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+        stage  = {.VERTEX},
+        module = vert_shader_module,
+        pName  = cstring("main"),
+    }
+
+    frag_shader_pipeline_stage := vk.PipelineShaderStageCreateInfo {
+        sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+        stage  = {.FRAGMENT},
+        module = frag_shader_module,
+        pName  = cstring("main"),
+    }
+
+    shader_stages := []vk.PipelineShaderStageCreateInfo{vert_shader_pipeline_stage, frag_shader_pipeline_stage}
+
+    vk.DestroyShaderModule(vk_context.device, vert_shader_module, nil)
+    vk.DestroyShaderModule(vk_context.device, frag_shader_module, nil)
+}
+
+create_shader_module :: proc(buff: []byte) -> (out: vk.ShaderModule) {
+    create_info := vk.ShaderModuleCreateInfo {
+        sType    = .SHADER_MODULE_CREATE_INFO,
+        codeSize = len(buff),
+        pCode    = cast(^u32)raw_data(buff),
+    }
+
+    if result := vk.CreateShaderModule(vk_context.device, &create_info, nil, &out); result != .SUCCESS {
+        panic("Unable to create shader module")
+    }
+    return
 }
 
 main :: proc() {
