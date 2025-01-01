@@ -10,16 +10,17 @@ import vk "vendor:vulkan"
 window: glfw.WindowHandle
 
 Vulkan_Context :: struct {
-    instance:          vk.Instance,
-    physical_device:   vk.PhysicalDevice,
-    device:            vk.Device,
-    surface:           vk.SurfaceKHR,
-    graphics_queue:    vk.Queue,
-    present_queue:     vk.Queue,
-    swap_chain:        vk.SwapchainKHR,
-    swap_chain_images: [dynamic]vk.Image,
-    swap_chain_extent: vk.Extent2D,
-    swap_chain_format: vk.Format,
+    instance:               vk.Instance,
+    physical_device:        vk.PhysicalDevice,
+    device:                 vk.Device,
+    surface:                vk.SurfaceKHR,
+    graphics_queue:         vk.Queue,
+    present_queue:          vk.Queue,
+    swap_chain:             vk.SwapchainKHR,
+    swap_chain_extent:      vk.Extent2D,
+    swap_chain_format:      vk.Format,
+    swap_chain_images:      [dynamic]vk.Image,
+    swap_chain_image_views: [dynamic]vk.ImageView,
 }
 
 Queue_Family_Indices :: struct {
@@ -60,6 +61,7 @@ init_vulkan :: proc() {
     pick_physical_device()
     create_logical_device()
     create_swap_chain()
+    create_image_views()
 }
 
 create_instance :: proc() {
@@ -407,6 +409,34 @@ query_swap_chain_support :: proc(device: vk.PhysicalDevice) -> Swap_Chain_Suppor
     return details
 }
 
+create_image_views :: proc() {
+    vk_context.swap_chain_image_views = make([dynamic]vk.ImageView, len(vk_context.swap_chain_images))
+    subresource_range :: vk.ImageSubresourceRange {
+        aspectMask     = {.COLOR},
+        baseMipLevel   = 0,
+        levelCount     = 1,
+        baseArrayLayer = 0,
+        layerCount     = 1,
+    }
+
+    // for &sciv, index in vk_context.swap_chain_image_views {
+    for index in 0 ..< len(vk_context.swap_chain_image_views) {
+        create_info := vk.ImageViewCreateInfo {
+            sType            = .IMAGE_VIEW_CREATE_INFO,
+            image            = vk_context.swap_chain_images[index],
+            viewType         = .D2,
+            format           = vk_context.swap_chain_format,
+            components       = {.R, .G, .B, .A}, // could map all to 1 channel to make monochrome
+            subresourceRange = subresource_range,
+        }
+
+        if result := vk.CreateImageView(vk_context.device, &create_info, nil, &vk_context.swap_chain_image_views[index]);
+           result != .SUCCESS {
+            panic("Unable to create image view for swap chain images")
+        }
+    }
+}
+
 main :: proc() {
     when ODIN_DEBUG {
         track: mem.Tracking_Allocator
@@ -436,6 +466,11 @@ main :: proc() {
     glfw.SetKeyCallback(window, key_cb)
 
     defer {
+        for &sciv in vk_context.swap_chain_image_views {
+            vk.DestroyImageView(vk_context.device, sciv, nil)
+        }
+
+        delete(vk_context.swap_chain_image_views)
         delete(vk_context.swap_chain_images)
         vk.DestroySwapchainKHR(vk_context.device, vk_context.swap_chain, nil)
         vk.DestroySurfaceKHR(vk_context.instance, vk_context.surface, nil)
@@ -459,4 +494,3 @@ key_cb :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods: i32)
         glfw.SetWindowShouldClose(window, true)
     }
 }
-
