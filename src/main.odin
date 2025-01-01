@@ -2,6 +2,7 @@ package vulkan_playground
 
 import "base:runtime"
 import "core:fmt"
+import "core:math/bits"
 import "core:mem"
 import "vendor:glfw"
 import vk "vendor:vulkan"
@@ -9,17 +10,27 @@ import vk "vendor:vulkan"
 window: glfw.WindowHandle
 
 Vulkan_Context :: struct {
-    instance:        vk.Instance,
-    physical_device: vk.PhysicalDevice,
-    device:          vk.Device,
-    surface:         vk.SurfaceKHR,
-    graphics_queue:  vk.Queue,
-    present_queue:   vk.Queue,
+    instance:          vk.Instance,
+    physical_device:   vk.PhysicalDevice,
+    device:            vk.Device,
+    surface:           vk.SurfaceKHR,
+    graphics_queue:    vk.Queue,
+    present_queue:     vk.Queue,
+    swap_chain:        vk.SwapchainKHR,
+    swap_chain_images: [dynamic]vk.Image,
+    swap_chain_extent: vk.Extent2D,
+    swap_chain_format: vk.Format,
 }
 
 Queue_Family_Indices :: struct {
     present_family:  u32,
     graphics_family: u32,
+}
+
+Swap_Chain_Support_Details :: struct {
+    capabilities: vk.SurfaceCapabilitiesKHR,
+    formats:      [dynamic]vk.SurfaceFormatKHR,
+    presentModes: [dynamic]vk.PresentModeKHR,
 }
 
 vk_context: Vulkan_Context
@@ -48,6 +59,7 @@ init_vulkan :: proc() {
     create_surface()
     pick_physical_device()
     create_logical_device()
+    create_swap_chain()
 }
 
 create_instance :: proc() {
@@ -107,12 +119,132 @@ pick_physical_device :: proc() {
             continue
         }
 
+        support := query_swap_chain_support(d)
+        defer {
+            delete(support.formats)
+            delete(support.presentModes)
+        }
+
+        swap_chain_adequate := len(support.formats) > 0 && len(support.presentModes) > 0
+
+        if !swap_chain_adequate {
+            continue
+        }
+
         if _, ok := get_queue_family_indices(d); ok {
             vk_context.physical_device = d
             return
         }
     }
     assert(false)
+}
+
+choose_swap_chain_surface_format :: proc(available_formats: []vk.SurfaceFormatKHR) -> vk.SurfaceFormatKHR {
+    for &format in available_formats {
+        if format.format == .B8G8R8A8_SRGB && format.colorSpace == .SRGB_NONLINEAR {
+            return format
+        }
+    }
+
+    return available_formats[0]
+}
+
+/// XXX  Note there's various present mode options, 2 of which are unlocked FR which could result 
+/// in tearing. The below code tries to go for triple buffering, and if unavailable goes for FIFO
+choose_swap_chain_present_mode :: proc(available_present_modes: []vk.PresentModeKHR) -> vk.PresentModeKHR {
+    for &present_mode in available_present_modes {
+        if present_mode == .MAILBOX {
+            return present_mode
+        }
+    }
+    // Default to FIFO if there's no mailbox (triple buffering)
+    return .FIFO
+}
+
+// This is the resolution of the swap chain images
+choose_swap_extent :: proc(capability: vk.SurfaceCapabilitiesKHR) -> vk.Extent2D {
+    if capability.currentExtent.width != bits.U32_MAX {
+        return capability.currentExtent
+    }
+
+    width, height := glfw.GetFramebufferSize(window)
+    actual_extent := vk.Extent2D {
+        width  = u32(width),
+        height = u32(height),
+    }
+
+    actual_extent.width = clamp(actual_extent.width, capability.minImageExtent.width, capability.maxImageExtent.width)
+    actual_extent.height = clamp(actual_extent.height, capability.minImageExtent.height, capability.maxImageExtent.height)
+
+    return actual_extent
+}
+
+create_swap_chain :: proc() {
+    support := query_swap_chain_support(vk_context.physical_device)
+    defer {
+        delete(support.formats)
+        delete(support.presentModes)
+    }
+
+    surface_format := choose_swap_chain_surface_format(support.formats[:])
+    present_mode := choose_swap_chain_present_mode(support.presentModes[:])
+    extent := choose_swap_extent(support.capabilities)
+
+    image_count: u32 = support.capabilities.minImageCount + 1
+    if support.capabilities.maxImageCount > 0 && image_count > support.capabilities.maxImageCount {
+        image_count = support.capabilities.maxImageCount
+    }
+
+    create_info := vk.SwapchainCreateInfoKHR {
+        sType            = .SWAPCHAIN_CREATE_INFO_KHR,
+        surface          = vk_context.surface,
+        minImageCount    = image_count,
+        imageFormat      = surface_format.format,
+        imageColorSpace  = surface_format.colorSpace,
+        imageExtent      = extent,
+        imageArrayLayers = 1,
+        imageUsage       = {.COLOR_ATTACHMENT}, // Transfer_dst_bit would be used for rendering to an image first
+    }
+
+    indices, ok := get_queue_family_indices(vk_context.physical_device)
+    assert(ok)
+
+    family_indices := [2]u32{indices.present_family, indices.graphics_family}
+
+    // Only if indices between present and graphics family differ
+    // do we need to specify the indices in the create_info struct
+    if indices.present_family != indices.graphics_family {
+        create_info.imageSharingMode = .CONCURRENT
+        create_info.queueFamilyIndexCount = 2
+        create_info.pQueueFamilyIndices = raw_data(family_indices[:])
+    } else {
+        create_info.imageSharingMode = .EXCLUSIVE
+        create_info.queueFamilyIndexCount = 0
+        create_info.pQueueFamilyIndices = nil
+    }
+
+    // Transforms to be applied we'll take the ones from the capabilities
+    create_info.preTransform = support.capabilities.currentTransform
+
+    // We always want opaque alpha with the windowing system
+    create_info.compositeAlpha = {.OPAQUE}
+
+    create_info.presentMode = present_mode
+    create_info.clipped = true
+
+    // create_info.oldSwapchain = vk.NULL // null isn't supported by the binding, but this only counts for resizing windows
+
+    if result := vk.CreateSwapchainKHR(vk_context.device, &create_info, nil, &vk_context.swap_chain); result != .SUCCESS {
+        panic("Unable to make swap chain")
+    }
+
+    swap_chain_image_count: u32
+    vk.GetSwapchainImagesKHR(vk_context.device, vk_context.swap_chain, &swap_chain_image_count, nil)
+    vk_context.swap_chain_images = make([dynamic]vk.Image, swap_chain_image_count)
+    vk.GetSwapchainImagesKHR(vk_context.device, vk_context.swap_chain, &swap_chain_image_count, raw_data(vk_context.swap_chain_images[:]))
+
+    vk_context.swap_chain_extent = extent
+    vk_context.swap_chain_format = surface_format.format
 }
 
 get_queue_family_indices :: proc(device: vk.PhysicalDevice) -> (Queue_Family_Indices, bool) {
@@ -251,6 +383,30 @@ check_device_extension_support :: proc(device: vk.PhysicalDevice) -> bool {
     return true
 }
 
+query_swap_chain_support :: proc(device: vk.PhysicalDevice) -> Swap_Chain_Support_Details {
+    details: Swap_Chain_Support_Details
+
+    vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(device, vk_context.surface, &details.capabilities)
+
+    format_count: u32
+    vk.GetPhysicalDeviceSurfaceFormatsKHR(device, vk_context.surface, &format_count, nil)
+
+    if format_count != 0 {
+        details.formats = make([dynamic]vk.SurfaceFormatKHR, format_count)
+        vk.GetPhysicalDeviceSurfaceFormatsKHR(device, vk_context.surface, &format_count, raw_data(details.formats[:]))
+    }
+
+    present_mode_count: u32
+    vk.GetPhysicalDeviceSurfacePresentModesKHR(device, vk_context.surface, &present_mode_count, nil)
+
+    if present_mode_count != 0 {
+        details.presentModes = make([dynamic]vk.PresentModeKHR, present_mode_count)
+        vk.GetPhysicalDeviceSurfacePresentModesKHR(device, vk_context.surface, &present_mode_count, raw_data(details.presentModes[:]))
+    }
+
+    return details
+}
+
 main :: proc() {
     when ODIN_DEBUG {
         track: mem.Tracking_Allocator
@@ -280,6 +436,8 @@ main :: proc() {
     glfw.SetKeyCallback(window, key_cb)
 
     defer {
+        delete(vk_context.swap_chain_images)
+        vk.DestroySwapchainKHR(vk_context.device, vk_context.swap_chain, nil)
         vk.DestroySurfaceKHR(vk_context.instance, vk_context.surface, nil)
         vk.DestroyDevice(vk_context.device, nil)
         vk.DestroyInstance(vk_context.instance, nil) // instance must be last
