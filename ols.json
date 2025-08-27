@@ -1,0 +1,7 @@
+{
+  "enable_references": true,
+  "enable_fake_methods": true,
+  "collections": [
+  ],
+  "checker_args": "-strict-style -vet -vet-using-param -vet-cast -vet-semicolon"
+}

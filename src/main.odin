@@ -24,6 +24,8 @@ Vulkan_Context :: struct {
     swap_chain_format:      vk.Format,
     swap_chain_images:      [dynamic]vk.Image,
     swap_chain_image_views: [dynamic]vk.ImageView,
+    pipeline_layout:        vk.PipelineLayout,
+    graphics_pipeline:      vk.Pipeline,
 }
 
 Queue_Family_Indices :: struct {
@@ -443,7 +445,10 @@ create_image_views :: proc() {
 
 create_graphics_pipeline :: proc() {
     vert_shader_module := create_shader_module(VERTEX_SHADER)
+    defer vk.DestroyShaderModule(vk_context.device, vert_shader_module, nil)
+
     frag_shader_module := create_shader_module(FRAG_SHADER)
+    defer vk.DestroyShaderModule(vk_context.device, frag_shader_module, nil)
 
     vert_shader_pipeline_stage := vk.PipelineShaderStageCreateInfo {
         sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -460,9 +465,95 @@ create_graphics_pipeline :: proc() {
     }
 
     shader_stages := []vk.PipelineShaderStageCreateInfo{vert_shader_pipeline_stage, frag_shader_pipeline_stage}
+    _ = shader_stages
 
-    vk.DestroyShaderModule(vk_context.device, vert_shader_module, nil)
-    vk.DestroyShaderModule(vk_context.device, frag_shader_module, nil)
+    // Need dynamic states setup to allow viewport / scissor to be adjustable without pipeline re-creation
+    dynamic_states := [2]vk.DynamicState{vk.DynamicState.VIEWPORT, vk.DynamicState.SCISSOR}
+    dynamic_state_info := vk.PipelineDynamicStateCreateInfo {
+        sType             = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        dynamicStateCount = len(dynamic_states),
+        pDynamicStates    = raw_data(dynamic_states[:]),
+    }
+    _ = dynamic_state_info
+
+    // viewport := vk.Viewport{0, 0, f32(vk_context.swap_chain_extent.width), f32(vk_context.swap_chain_extent.height)}
+    // viewport_scissor := vk.Rect2D{vk.Offset2D{0, 0}, vk_context.swap_chain_extent}
+
+    viewport_state_info := vk.PipelineViewportStateCreateInfo {
+        sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        viewportCount = 1,
+        scissorCount  = 1,
+    }
+
+    vertex_input_info: vk.PipelineVertexInputStateCreateInfo
+    input_assembly_info := vk.PipelineInputAssemblyStateCreateInfo {
+        sType    = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        topology = vk.PrimitiveTopology.TRIANGLE_LIST,
+    }
+
+    rasterization_state_info := vk.PipelineRasterizationStateCreateInfo {
+        sType                   = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        polygonMode             = .FILL,
+        depthClampEnable        = false,
+        rasterizerDiscardEnable = false,
+        cullMode                = {.BACK},
+        frontFace               = .CLOCKWISE,
+        depthBiasEnable         = false,
+        lineWidth               = 1.,
+    }
+
+    multisampling_info := vk.PipelineMultisampleStateCreateInfo {
+        sType                = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        rasterizationSamples = {._1},
+        sampleShadingEnable  = false,
+    }
+
+    colour_blend_attachment := vk.PipelineColorBlendAttachmentState {
+        blendEnable         = true,
+        srcColorBlendFactor = .SRC_ALPHA,
+        dstColorBlendFactor = .ONE_MINUS_SRC_ALPHA,
+        colorBlendOp        = .ADD,
+        srcAlphaBlendFactor = .ONE,
+        dstAlphaBlendFactor = .ZERO,
+        alphaBlendOp        = .ADD,
+        colorWriteMask      = {.R, .G, .B, .A},
+    }
+
+    colour_blend_state_info := vk.PipelineColorBlendStateCreateInfo {
+        sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        logicOpEnable   = false,
+        logicOp         = .COPY,
+        attachmentCount = 1,
+        pAttachments    = &colour_blend_attachment,
+    }
+
+    pipeline_layout_info := vk.PipelineLayoutCreateInfo {
+        sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
+        setLayoutCount         = 0,
+        pushConstantRangeCount = 0,
+    }
+
+    pipeline_rendering_create_info := vk.PipelineRenderingCreateInfo {
+        sType                   = .PIPELINE_RENDERING_CREATE_INFO,
+        colorAttachmentCount    = 1,
+        pColorAttachmentFormats = &vk_context.swap_chain_format,
+    }
+
+    ensure(vk.CreatePipelineLayout(vk_context.device, &pipeline_layout_info, nil, &vk_context.pipeline_layout) == .SUCCESS)
+
+    graphics_pipeline_create_info := vk.GraphicsPipelineCreateInfo {
+        sType               = .GRAPHICS_PIPELINE_CREATE_INFO,
+        pNext               = &pipeline_rendering_create_info,
+        pVertexInputState   = &vertex_input_info,
+        pInputAssemblyState = &input_assembly_info,
+        pViewportState      = &viewport_state_info,
+        pRasterizationState = &rasterization_state_info,
+        pMultisampleState   = &multisampling_info,
+        pColorBlendState    = &colour_blend_state_info,
+        pDynamicState       = &dynamic_state_info,
+        layout              = vk_context.pipeline_layout,
+        renderPass          = {},
+    }
 }
 
 create_shader_module :: proc(buff: []byte) -> (out: vk.ShaderModule) {
@@ -511,8 +602,12 @@ main :: proc() {
             vk.DestroyImageView(vk_context.device, sciv, nil)
         }
 
+        vk.DestroyPipelineLayout(vk_context.device, vk_context.pipeline_layout, nil)
+        vk.DestroyPipeline(vk_context.device, vk_context.graphics_pipeline, nil)
+
         delete(vk_context.swap_chain_image_views)
         delete(vk_context.swap_chain_images)
+
         vk.DestroySwapchainKHR(vk_context.device, vk_context.swap_chain, nil)
         vk.DestroySurfaceKHR(vk_context.instance, vk_context.surface, nil)
         vk.DestroyDevice(vk_context.device, nil)
@@ -523,7 +618,6 @@ main :: proc() {
 
     for !glfw.WindowShouldClose(window) {
         glfw.PollEvents()
-
     }
 }
 
@@ -535,3 +629,4 @@ key_cb :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods: i32)
         glfw.SetWindowShouldClose(window, true)
     }
 }
+
